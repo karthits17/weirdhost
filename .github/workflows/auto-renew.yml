@@ -1,0 +1,108 @@
+name: Weirdhost Auto Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 */3 * *'  # 北京时间 12:00 (UTC 4:00)
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 1. 系统依赖安装 (加入了 ffmpeg 用于处理音频)
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            google-chrome-stable \
+            unzip \
+            xvfb \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64 \
+            libatspi2.0-0 \
+            libxshmfence1 \
+            fonts-liberation \
+            xfonts-75dpi \
+            xfonts-base
+
+      # 2. 安装 Python 依赖 (加入了 pydub, SpeechRecognition, PyNaCl)
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install DrissionPage requests pydub SpeechRecognition PyNaCl
+
+      # 3. Xray 代理搭建
+      - name: Setup Xray Proxy
+        run: |
+          # 下载最新 Xray 核心
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -o xray.zip
+          chmod +x xray
+          
+          # 写入配置
+          cat << 'EOF' > config.json
+          ${{ secrets.XRAY_CONFIG_JSON }}
+          EOF
+          
+          if [ ! -s config.json ]; then
+            echo "❌ Error: XRAY_CONFIG_JSON is empty!"
+            exit 1
+          fi
+          
+          # 启动 Xray (监听 10808)
+          ./xray -c config.json > xray_log.txt 2>&1 &
+          echo "Xray 代理已在后台启动 (SOCKS5 Port: 10808)"
+          
+          sleep 12
+          
+          if ps aux | grep -v grep | grep -q "./xray"; then
+            echo "✅ Xray 进程运行中"
+            tail -n 20 xray_log.txt
+          else
+            echo "❌ Xray 启动失败"
+            cat xray_log.txt
+            exit 1
+          fi
+
+      # 4. 使用 xvfb-run 运行脚本，并传递环境变量
+      - name: Run Renewal Script
+        env:
+          # 修正了 Python 脚本中实际调用的环境变量名称
+          WEIRDHOST_COOKIE:       ${{ secrets.WEIRDHOST_COOKIE }}
+          GH_TOKEN:               ${{ secrets.GH_TOKEN }} # 用于 Python 自动更新 Cookie Secret
+          WEIRDHOST_SERVER_URLS:  ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          TG_BOT_TOKEN:           ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
+          WEB_EMAIL:              ${{ secrets.WEB_EMAIL }}
+          WEB_PASSWORD:           ${{ secrets.WEB_PASSWORD }}
+          PROXY:                  "127.0.0.1:10808"
+        run: |
+          # 使用 xvfb-run 伪造显示器环境，解决 DrissionPage 在 GHA 的 Headless 问题
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
+
+      # 5. 上传日志和截图 artifact
+      - name: Upload Debug Artifacts (Always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-and-screenshots
+          path: |
+            *.png
+            xray_log.txt
+            *.wav
+            *.mp3
+          retention-days: 3

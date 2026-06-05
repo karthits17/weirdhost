@@ -1,0 +1,106 @@
+name: Weirdhost Auto Renewal with Proxy (SeleniumBase)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 10 * * *'  # 每2天北京时间 18:00 运行（UTC 10:00）
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies for Chrome & Virtual Display
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            google-chrome-stable \
+            unzip \
+            xvfb \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64 \
+            libatspi2.0-0 \
+            libxshmfence1 \
+            fonts-liberation \
+            xfonts-75dpi \
+            xfonts-base
+
+      # 下面继续你的 Install Python Dependencies、Setup Xray Proxy 等步骤...
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install seleniumbase requests
+          # SeleniumBase 会自动管理 chromedriver，但可以显式安装以确保兼容
+          sbase install chromedriver
+
+      - name: Setup Xray Proxy
+        run: |
+          # 下载最新 Xray 核心（linux-64）
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          
+          # 强制覆盖解压
+          unzip -o xray.zip
+          
+          chmod +x xray
+          
+          # 写入配置文件（从 Secret 获取）
+          cat << 'EOF' > config.json
+          ${{ secrets.XRAY_CONFIG_JSON }}
+          EOF
+          
+          # 检查 config 是否为空
+          if [ ! -s config.json ]; then
+            echo "❌ Error: XRAY_CONFIG_JSON secret is empty or invalid!"
+            exit 1
+          fi
+          
+          # 后台启动 Xray
+          ./xray -c config.json > xray_log.txt 2>&1 &
+          
+          echo "Xray 代理已在后台启动 (SOCKS5 Port: 10808)"
+          
+          # 等待启动并建立连接
+          sleep 12
+          
+          # 检查进程是否存活
+          if ps aux | grep -v grep | grep -q "./xray"; then
+            echo "✅ Xray 进程运行中"
+            echo "最近日志:"
+            tail -n 20 xray_log.txt
+          else
+            echo "❌ Xray 启动失败，请检查日志："
+            cat xray_log.txt
+            exit 1
+          fi
+
+      - name: Run Renewal Script
+        env:
+          TWOCAPTCHA_API_KEY:     ${{ secrets.TWOCAPTCHA_API_KEY }}
+          REMEMBER_WEB_COOKIE:    ${{ secrets.REMEMBER_WEB_COOKIE }}
+          WEIRDHOST_SERVER_URLS:  ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          TG_BOT_TOKEN:           ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
+
+      - name: Upload Debug Artifacts (Always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-and-screenshots
+          path: |
+            *.png
+            xray_log.txt
+          retention-days: 7
