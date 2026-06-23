@@ -3,7 +3,7 @@ name: Weirdhost Auto Renew (Sing-Box HY2)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 22 * * *'  # 北京凌晨 06:15
+    - cron: '15 19 * * *'  # 北京凌晨 03:15
     - cron: '42 14 * * *'  # 北京晚间 22:42
 
 jobs:
