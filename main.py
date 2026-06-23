@@ -17,6 +17,127 @@ try:
 except ImportError:
     pass
 
+try:
+    import speech_recognition as sr
+    from pydub import AudioSegment
+except ImportError:
+    pass
+
+class RecaptchaAudioSolver:
+    """验证破解器"""
+    def __init__(self, page):
+        self.page = page
+        self.log_func = print
+        self.max_retries = 3
+
+    def set_logger(self, func):
+        self.log_func = func
+
+    def log(self, msg):
+        self.log_func(f"[Solver] {msg}")
+
+    def solve(self, iframe_ele):
+        self.log("🎧 启动破解流程...")
+        try:
+            audio_btn = iframe_ele.ele('css:#recaptcha-audio-button', timeout=3)
+            if not audio_btn:
+                self.log("❌ 未找到破解按钮")
+                return False
+            audio_btn.click()
+            self.log("🖱️ 点击了破解按钮")
+            time.sleep(random.uniform(2, 4)) 
+        except Exception as e:
+            self.log(f"❌ 初始点击音频按钮失败: {e}")
+            return False
+
+        for attempt in range(self.max_retries):
+            self.log(f"🔄 开始第 {attempt + 1}/{self.max_retries} 次破解尝试...")
+            try:
+                if attempt > 0:
+                    reload_btn = iframe_ele.ele('css:#recaptcha-reload-button', timeout=3)
+                    if reload_btn:
+                        reload_btn.click()
+                        time.sleep(random.uniform(3, 5))
+
+                src = self.get_audio_source(iframe_ele)
+                if not src:
+                    self.log("❌ 无法获取token链接")
+                    continue 
+
+                self.log("📥 下载token...")
+                mp3_file = "audio.mp3"
+                wav_file = "audio.wav"
+                
+                if os.path.exists(mp3_file): os.remove(mp3_file)
+                if os.path.exists(wav_file): os.remove(wav_file)
+
+                r = requests.get(src, timeout=15)
+                if r.status_code != 200: continue
+                    
+                with open(mp3_file, 'wb') as f: f.write(r.content)
+                
+                try:
+                    sound = AudioSegment.from_mp3(mp3_file)
+                    sound.export(wav_file, format="wav")
+                except Exception as e:
+                    self.log(f"❌ ffmpeg 转码失败: {e}")
+                    continue
+
+                key_text = ""
+                recognizer = sr.Recognizer()
+                with sr.AudioFile(wav_file) as source:
+                    audio_data = recognizer.record(source)
+                    try:
+                        key_text = recognizer.recognize_google(audio_data)
+                        self.log(f"🗣️ 识别结果: [{key_text}]")
+                    except: continue
+
+                input_box = iframe_ele.ele('css:#audio-response')
+                if input_box:
+                    input_box.click()
+                    time.sleep(0.5)
+                    for char in key_text:
+                        input_box.input(char, clear=False)
+                        time.sleep(random.uniform(0.05, 0.15))
+                    
+                    time.sleep(1)
+                    verify_btn = iframe_ele.ele('css:#recaptcha-verify-button')
+                    if verify_btn:
+                        verify_btn.click()
+                        time.sleep(4)
+                        
+                        try:
+                            if iframe_ele.states.is_displayed:
+                                err = iframe_ele.ele('css:.rc-audiochallenge-error-message')
+                                if err and err.states.is_displayed:
+                                    self.log(f"❌ 验证未通过: {err.text}")
+                                    continue
+                        except: pass
+                        
+                        self.log("✅ 验证通过")
+                        return True
+                        
+            except Exception as e:
+                self.log(f"💥 单次尝试异常: {e}")
+            finally:
+                if os.path.exists("audio.mp3"): os.remove("audio.mp3")
+                if os.path.exists("audio.wav"): os.remove("audio.wav")
+
+        self.log("❌ 破解彻底失败")
+        return False
+
+    def get_audio_source(self, iframe_ele):
+        try:
+            download_link = iframe_ele.ele('css:.rc-audiochallenge-ndownload-link') or \
+                            iframe_ele.ele('css:a.rc-audiochallenge-download-link') or \
+                            iframe_ele.ele('xpath://a[contains(@href, ".mp3")]')
+            if download_link: return download_link.attr('href')
+            
+            audio_tag = iframe_ele.ele('css:#audio-source')
+            if audio_tag: return audio_tag.attr('src')
+            return None
+        except: return None
+
 class WeirdhostGHA:
     def __init__(self):
         self.tg_token = os.getenv('TG_BOT_TOKEN')
@@ -102,7 +223,7 @@ class WeirdhostGHA:
 
             if click_success:
                 if is_interstitial: 
-                    self.log("⏳ [拦截页模式] 点击完成，交由主流程检测重定向...")
+                    self.log("⏳ [拦截页模式] 点击完成，跳过 Token 等待，交由主流程检测重定向...")
                     return True
                 for _ in range(15):
                     time.sleep(1)
@@ -110,41 +231,6 @@ class WeirdhostGHA:
                     if resp and resp.value: return True
             return False
         except: return False
-            
-    def try_cookie_login(self, page, cookie_json):
-        self.log("🍪 尝试使用 Cookie 免密登录...")
-        try:
-            # 关键修复：必须先访问目标域名建立上下文，再设置 Cookie
-            page.get("https://hub.weirdhost.xyz/auth/login", retry=3)
-            time.sleep(3)
-            
-            # 处理可能的首页盾
-            if page.ele('css:iframe[src^="https://challenges.cloudflare.com"]', timeout=2):
-                self.log("🚧 发现登录前的 Turnstile 安全验证...")
-                self.solve_turnstile(page, is_interstitial=True)
-                self.log("⏳ 等待页面验证通过后自动跳转 (最多等待 30s)...")
-                for _ in range(30):
-                    if "login" in page.url or page.ele('css:input[name="username"]', timeout=0.5): break
-                    time.sleep(0.5)
-            
-            # 此时页面必定是在 /auth/login 或者已经带有效域名的状态下
-            cookies = json.loads(cookie_json)
-            page.set.cookies(cookies)
-            
-            # 重新加载页面让 Cookie 生效
-            self.log("🔄 注入 Cookie 后重新加载页面...")
-            page.get("https://hub.weirdhost.xyz/auth/login")
-            time.sleep(3)
-            
-            if "login" not in page.url:
-                self.log("🎉 Cookie 登录成功！")
-                return True
-            else:
-                self.log("❌ Cookie 已失效！无法进入后台，请重新抓取 Cookie！")
-                return False
-        except Exception as e:
-            self.log(f"💥 Cookie 解析异常: {e}")
-            return False
 
     def check_and_update_cookies(self, page, secret_name, old_cookie_json):
         self.log(f"🔍 检查账号 {secret_name} 的 Cookie 是否需要更新...")
@@ -171,10 +257,10 @@ class WeirdhostGHA:
                     break
             
             if new_remember_value and new_remember_value != old_remember_value:
-                self.log("🔄 检测到核心 Cookie 变化，自动更新 GitHub Secret...")
+                self.log("🔄 检测到核心cookie发生变化，准备保存至 GitHub Secret...")
                 self.update_github_secret(secret_name, json.dumps(pure_cookie_list))
             else:
-                self.log("✅ 核心 Cookie 无变化。")
+                self.log("✅ 核心cookie (remember_web_*) 无变化，无需更新。")
         except Exception as e:
             self.log(f"💥 检查/更新 Cookie 异常: {e}")
 
@@ -193,13 +279,12 @@ class WeirdhostGHA:
 
             r_update = requests.put(f"https://api.github.com/repos/{self.gh_repo}/actions/secrets/{secret_name}", headers=headers, json={"encrypted_value": encrypted, "key_id": key_data['key_id']})
             if r_update.status_code in [201, 204]: self.log(f"🎉 成功更新 Secret: {secret_name}")
-        except Exception as e:
-            self.log(f"💥 Secret 更新异常: {e}")
+        except: pass
 
     def run(self):
-        self.log("🚀 启动自动化流程 (多账号 Cookie 免密严格注入版)...")
+        self.log("🚀 启动自动化流程...")
         if not self.accounts:
-            self.log("❌ 未检测到任何 WEIRDHOST_COOKIE_X 配置，退出。")
+            self.log("❌ 致命错误: 未检测到 WEIRDHOST_COOKIE 配置！")
             return
 
         co = ChromiumOptions()
@@ -229,99 +314,183 @@ class WeirdhostGHA:
             for acc in self.accounts:
                 self.log(f"\n{'='*50}\n🚀 开始处理账号 [{acc['index']}]\n{'='*50}")
                 
+                # 每次处理新账号前，清空浏览器缓存防止串号
                 try: page.clear_cache(cookies=True)
                 except: pass
 
-                if not self.try_cookie_login(page, acc['cookie']):
+                # 1. 严格还原单账号登录逻辑：打开登录页
+                self.log("🔗 打开登录页...")
+                page.get("https://hub.weirdhost.xyz/auth/login", retry=3)
+
+                max_retries = 3
+                for attempt in range(max_retries):
+                    time.sleep(3)
+                    
+                    # 只有真正看到了输入框，才算通过了前置盾
+                    if page.ele('css:input[name="username"]', timeout=2):
+                        self.log("✅ 成功重定向进入正式登录界面")
+                        break
+                        
+                    if page.ele('css:iframe[src^="https://challenges.cloudflare.com"]', timeout=2) or page.ele('css:iframe[id^="cf-chl-widget-"]', timeout=2):
+                        self.log(f"🚧 发现登录前的 Turnstile 安全验证 (第 {attempt + 1}/{max_retries} 次尝试)...")
+                        self.solve_turnstile(page, is_interstitial=True)
+                        
+                        self.log("⏳ 等待页面验证通过后自动跳转 (最多等待 30s)...")
+                        success_bypass = False
+                        for i in range(30):
+                            # 【核心修复】绝不用 page.url 判断，只认真实的输入框！
+                            if page.ele('css:input[name="username"]', timeout=0.5):
+                                self.log("✅ 成功重定向进入正式登录界面")
+                                success_bypass = True
+                                break
+                            time.sleep(0.5)
+                            
+                        if success_bypass: break
+                        else:
+                            self.log("⚠️ 尝试未能进入登录页。")
+                            if attempt < max_retries - 1: page.refresh()
+
+                # 2. CF 放行后，注入当前账号的 Cookie
+                login_success = False
+                if acc['cookie'] and acc['cookie'].strip() not in ['', '[]']:
+                    self.log("🍪 发现缓存 Cookie，尝试使用 Cookie 登录...")
                     try:
-                        ss_name = f'cookie_fail_acc{acc["index"]}.png'
-                        page.get_screenshot(path='.', name=ss_name)
-                    except: ss_name = None
-                    msg = f"🤖 <b>Weirdhost 续期报告</b> 🐾\n👤 账号: {acc['index']}\n❌ <b>状态: Cookie 已失效！</b>\n⚠️ <i>请重新抓取并更新 WEIRDHOST_COOKIE_{acc['index']}</i>"
-                    self.send_tg_notification(msg, ss_name)
+                        cookies = json.loads(acc['cookie'])
+                        page.set.cookies(cookies)
+                        # 注入后重新访问登录页，利用 Cookie 免密跳过
+                        page.get("https://hub.weirdhost.xyz/auth/login")
+                        time.sleep(3)
+                        
+                        if "login" not in page.url:
+                            self.log("🎉 Cookie 登录成功！")
+                            login_success = True
+                        else:
+                            self.log("❌ Cookie 已失效！由于使用谷歌授权登录，无法后退至账号密码。请重新抓取！")
+                    except Exception as e:
+                        self.log(f"💥 Cookie 解析异常: {e}")
+
+                if not login_success:
+                    msg = f"🤖 <b>Weirdhost 续期报告</b>\n👤 账号: {acc['index']}\n❌ <b>状态: Cookie 已失效/解析失败！</b>\n⚠️ <i>请重新抓取 Cookie 并更新</i>"
+                    self.send_tg_notification(msg)
                     continue
 
+                # 3. 登录成功，开始处理节点
+                self.log("✅ 登录成功，开始处理续期...")
                 for url in acc['urls']:
                     srv_id = url.split('/')[-1]
-                    self.log(f"\n⚡ 正在潜入服务器: {srv_id}")
+                    self.log(f"\n⚡ 服务器: {srv_id}")
                     page.get(url)
                     page.wait.load_start()
                     time.sleep(5)
                     
                     if "login" in page.url or "시간" not in page.html:
                         if not re.search(r'202\d-\d{2}-\d{2}', page.html):
-                            self.log("❌ 无法进入后台 (被阻断)")
+                            self.log("❌ 无法进入后台 (可能被墙/Cookie失效)")
                             continue
 
                     self.log("✅ 已进入管理面板")
                     days, expiry = self.get_remaining_days(page)
-                    expiry_str = expiry.strftime('%Y-%m-%d %H:%M:%S') if expiry else '未知'
+                    expiry_str = expiry.strftime('%Y-%m-%d %H:%M:%S') if expiry else '未知时间'
                     
                     if days is not None and days > 7:
+                        self.log(f"📅 解析到期日: {expiry_str} (剩余 {days} 天)")
                         self.log(f"⏭️ 剩余 {days} 天，跳过")
-                        ss_name = f'status_skip_{srv_id}_{int(time.time())}.png'
+                        
+                        ss_name = f'status_skip_{srv_id}.png'
                         page.get_screenshot(path='.', name=ss_name)
                         
-                        msg = f"🤖 <b>Weirdhost 续期报告</b> 🐾\n👤 账号: {acc['index']}\n✅ <code>{srv_id}</code>: 无需续期\n📅 解析到期日: {expiry_str} (剩余 {days} 天)\n⏭️ 剩余 {days} 天，跳过"
+                        # 严格按照主人的排版要求定制 TG 消息
+                        msg = f"🤖 <b>Weirdhost 续期报告</b>\n✅ {srv_id}: 无需续期\n📅 解析到期日: {expiry_str} (剩余 {days} 天)\n⏭️ 剩余 {days} 天，跳过"
                         self.send_tg_notification(msg, ss_name)
                         continue
                     
-                    self.log("🔄 满足条件，尝试续期...")
+                    self.log("🔄 续期中...")
                     renew_btn = page.ele('css:button.bkrtgq') or page.ele('text:Extend') or page.ele('text:연장하기') or page.ele('text:연장 하기')
-                    status = "未知"
+                    status = "未知状态"
                     
                     if renew_btn:
                         try:
                             renew_btn.click()
+                            self.log("🖱️ 点击了续期按钮")
                             time.sleep(5)
 
+                            passed_captcha = True
                             if page.ele('css:[name="cf-turnstile-response"]'):
+                                self.log("🚧 检测到 Turnstile 验证")
                                 if self.solve_turnstile(page):
                                     time.sleep(3)
                                     if page.ele('css:button.bkrtgq'): page.ele('css:button.bkrtgq').click()
-                                else: status = "❌ Turnstile 验证失败"
-                            
-                            self.log("⏳ 等待弹窗...")
-                            next_btn = None
-                            for _ in range(10):
-                                next_btn = page.ele('css:div[class*="Popup__Styled"] button') or page.ele('xpath://button[contains(., "Next") or contains(., "NEXT")]')
-                                if next_btn: break
-                                time.sleep(1)
-
-                            if next_btn:
-                                body_text = page.ele('tag:body').text
-                                if '성공' in body_text or 'SUCCESS' in body_text.upper() or '연장' in body_text: status = "🎉 续期成功"
-                                elif '아직' in body_text or 'ERROR' in body_text.upper() or '없어요' in body_text: status = "⏳ 冷却中"
-                                else: status = "✅ 已点击 (状态未知)"
-                                
-                                try: next_btn.click()
-                                except: page.run_js('arguments[0].click()', next_btn)
+                                else:
+                                    passed_captcha = False
+                                    status = "❌ Turnstile 验证失败"
                             else:
-                                body_text = page.ele('tag:body').text
-                                if 'SUCCESS' in body_text.upper() or '성공' in body_text: status = "🎉 续期成功"
-                                elif 'ERROR' in body_text.upper() or '아직' in body_text: status = "⏳ 冷却中"
-                                else: status = "🎉 已提交"
+                                self.log("⚡ 未触发验证，直接通过")
+
+                            if passed_captcha:
+                                self.log("⏳ 正在等待过盾后的弹窗...")
+                                next_btn = None
+                                for _ in range(10):
+                                    next_btn = page.ele('css:div[class*="Popup__Styled"] button') or page.ele('xpath://button[contains(., "Next") or contains(., "NEXT")]')
+                                    if next_btn: break
+                                    time.sleep(1)
+
+                                if next_btn:
+                                    body_text = page.ele('tag:body').text
+                                    if '성공' in body_text or 'SUCCESS' in body_text.upper() or '연장' in body_text:
+                                        status = "🎉 续期成功"
+                                    elif '아직' in body_text or 'ERROR' in body_text.upper() or '없어요' in body_text:
+                                        status = "⏳ 冷却中"
+                                    else:
+                                        status = "✅ 操作完成 (状态未知)"
+                                    
+                                    try: next_btn.click()
+                                    except: page.run_js('arguments[0].click()', next_btn)
+                                    
+                                    time.sleep(2)
+                                    close_btn = None
+                                    for _ in range(5):
+                                        close_btn = page.ele('css:div[class*="Popup__Styled"] button') or page.ele('xpath://button[contains(., "닫기")]')
+                                        if close_btn: break
+                                        time.sleep(1)
+                                        
+                                    if close_btn:
+                                        try: close_btn.click()
+                                        except: page.run_js('arguments[0].click()', close_btn)
+                                        time.sleep(1)
+                                else:
+                                    body_text = page.ele('tag:body').text
+                                    if 'SUCCESS' in body_text.upper() or '성공' in body_text: status = "🎉 续期成功"
+                                    elif 'ERROR' in body_text.upper() or '아직' in body_text: status = "⏳ 冷却中"
+                                    else: status = "🎉 续期已提交"
 
                         except Exception as e:
                             self.log(f"⚠️ 点击续期按钮异常: {e}")
                             status = "❌ 点击异常"
                     else:
-                        status = "❓ 未找到续期按钮"
-
+                        self.log("⚠️ 未找到续期按钮")
+                        status = "❓ 未找到按钮"
+                    
                     page.refresh()
                     time.sleep(5)
                     
-                    final_ss = f'final_{srv_id}_{int(time.time())}.png'
+                    final_ss = f'final_state_{srv_id}.png'
                     page.get_screenshot(path='.', name=final_ss)
                     
                     new_days, new_date = self.get_remaining_days(page)
-                    new_date_str = new_date.strftime('%Y-%m-%d %H:%M:%S') if new_date else '未知'
+                    new_date_str = new_date.strftime('%Y-%m-%d %H:%M:%S') if new_date else '未知时间'
                     
-                    msg = f"🤖 <b>Weirdhost 续期报告</b> 🐾\n👤 账号: {acc['index']}\n🔄 <code>{srv_id}</code>: {status}\n📅 解析到期日: {new_date_str}"
-                    if new_days is not None: msg += f" (剩余 {new_days} 天)"
+                    # 严格按照主人的排版要求定制 TG 消息
+                    msg = f"🤖 <b>Weirdhost 续期报告</b>\n"
+                    if status == "🎉 续期成功" or status == "🎉 续期已提交":
+                        msg += f"✅ {srv_id}: 续期成功\n📅 解析到期日: {new_date_str}"
+                        if new_days is not None: msg += f" (剩余 {new_days} 天)"
+                    else:
+                        msg += f"🔄 {srv_id}: {status}\n📅 当前到期日: {new_date_str}"
+                        if new_days is not None: msg += f" (剩余 {new_days} 天)"
                     
                     self.send_tg_notification(msg, final_ss)
 
+                # 4. 单个账号处理完毕，检查 Cookie 更新
                 self.check_and_update_cookies(page, acc['secret_name'], acc['cookie'])
 
         except Exception as e:
