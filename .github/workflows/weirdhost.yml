@@ -1,4 +1,50 @@
-# 3. Sing-Box 代理搭建 (顶替 Xray 完美承载 HY2 协议)
+name: Weirdhost Auto Renew (Sing-Box HY2)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 19 * * *'  # 北京凌晨 03:20
+    - cron: '42 14 * * *'  # 北京晚间 22:42
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            google-chrome-stable \
+            unzip \
+            xvfb \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgbm1 \
+            libasound2t64 \
+            libatspi2.0-0 \
+            libxshmfence1 \
+            fonts-liberation \
+            xfonts-75dpi \
+            xfonts-base
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install DrissionPage requests pydub SpeechRecognition PyNaCl
+
       - name: Setup Sing-Box Proxy
         run: |
           # 下载最新的稳定版 Sing-Box 核心
@@ -31,3 +77,91 @@
             cat xray_log.txt
             exit 1
           fi
+
+      - name: Run Renewal Script
+        env:
+          WEIRDHOST_COOKIE:       ${{ secrets.WEIRDHOST_COOKIE }}
+          GH_TOKEN:               ${{ secrets.GH_TOKEN }}
+          WEIRDHOST_SERVER_URLS:  ${{ secrets.WEIRDHOST_SERVER_URLS }}
+          TG_BOT_TOKEN:           ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
+          WEB_EMAIL:              ${{ secrets.WEB_EMAIL }}
+          WEB_PASSWORD:           ${{ secrets.WEB_PASSWORD }}
+          PROXY:                  "127.0.0.1:10808"
+        run: |
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python main.py
+
+      - name: Upload Debug Artifacts (Always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-and-screenshots
+          path: |
+            *.png
+            xray_log.txt
+            *.wav
+            *.mp3
+          retention-days: 3
+
+      - name: Update Next Schedule
+        if: always()
+        env:
+          TRIGGERED_CRON: ${{ github.event.schedule }}
+        run: |
+          python - << 'PYEOF'
+          import random, re, os
+
+          triggered = os.environ.get("TRIGGERED_CRON", "").strip()
+          print(f"本次触发的 cron: '{triggered}'")
+
+          yml_path = ".github/workflows/weirdhost.yml"
+          with open(yml_path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          def gen_cron(bj_start, bj_end):
+              bj_h = random.randint(bj_start, bj_end - 1)
+              bj_m = random.randint(0, 59)
+              utc_h = (bj_h - 8) % 24
+              return f"{bj_m} {utc_h} * * *", bj_h, bj_m
+
+          is_evening = False
+          if triggered:
+              parts = triggered.split()
+              try:
+                  utc_hour = int(parts[1])
+                  is_evening = (10 <= utc_hour <= 14)
+              except (IndexError, ValueError):
+                  pass
+
+          if is_evening:
+              new_cron, bj_h, bj_m = gen_cron(18, 23)
+              label = "晚间"
+              pattern = r"(    - cron: '[^']*'[^\n]*# 北京晚间[^\n]*)"
+              replacement = f"    - cron: '{new_cron}'  # 北京晚间 {bj_h:02d}:{bj_m:02d}"
+          else:
+              new_cron, bj_h, bj_m = gen_cron(1, 8)
+              label = "凌晨"
+              pattern = r"(    - cron: '[^']*'[^\n]*# 北京凌晨[^\n]*)"
+              replacement = f"    - cron: '{new_cron}'  # 北京凌晨 {bj_h:02d}:{bj_m:02d}"
+
+          new_content = re.sub(pattern, replacement, content, count=1)
+
+          if new_content == content:
+              print("⚠️ 未匹配到对应 cron 行，检查 yml 注释格式")
+              exit(1)
+
+          with open(yml_path, "w", encoding="utf-8") as f:
+              f.write(new_content)
+
+          print(f"✅ 已更新北京{label}时段 → {bj_h:02d}:{bj_m:02d}（cron: {new_cron}）")
+          PYEOF
+
+      - name: Commit and Push Updated Schedule
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/weirdhost.yml
+          git diff --cached --quiet && echo "无变化，跳过提交" && exit 0
+          git commit -m "chore: 自动更新下次运行时间 [skip ci]"
+          git push
