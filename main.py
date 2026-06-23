@@ -233,19 +233,44 @@ class WeirdhostGHA:
         except: return False
 
     def try_cookie_login(self, page, cookie_json):
-        self.log("🍪 尝试使用 Cookie 免密登录...")
+        self.log("🍪 开始 Cookie 登录流程...")
         try:
             page.get("https://hub.weirdhost.xyz/auth/login", retry=3)
-            time.sleep(3)
             
-            if page.ele('css:iframe[src^="https://challenges.cloudflare.com"]', timeout=2):
-                self.log("🚧 发现登录前的 Turnstile 安全验证...")
-                self.solve_turnstile(page, is_interstitial=True)
-                self.log("⏳ 等待页面验证通过后自动跳转 (最多等待 30s)...")
-                for _ in range(30):
-                    if "login" in page.url or page.ele('css:input[name="username"]', timeout=0.5): break
-                    time.sleep(0.5)
-            
+            # ================= 完美还原单账号的死等逻辑 =================
+            max_retries = 3
+            for attempt in range(max_retries):
+                time.sleep(3)
+                
+                # 只有真正看到了输入框，才算过了盾！
+                if page.ele('css:input[name="username"]', timeout=2):
+                    self.log("✅ 成功加载登录界面，环境安全")
+                    break
+                    
+                if page.ele('css:iframe[src^="https://challenges.cloudflare.com"]', timeout=2) or page.ele('css:iframe[id^="cf-chl-widget-"]', timeout=2):
+                    self.log(f"🚧 发现登录前的 Turnstile 安全验证 (第 {attempt + 1}/{max_retries} 次尝试)...")
+                    self.solve_turnstile(page, is_interstitial=True)
+                    
+                    self.log("⏳ 等待页面验证通过后自动跳转 (最多等待 30s)...")
+                    success_bypass = False
+                    for i in range(30):
+                        # 绝对不使用 page.url 判断，只认真实的输入框！
+                        if page.ele('css:input[name="username"]', timeout=0.5):
+                            self.log("✅ 成功重定向进入正式登录界面")
+                            success_bypass = True
+                            break
+                        time.sleep(0.5)
+                        
+                    if success_bypass:
+                        break
+                    else:
+                        self.log(f"⚠️ 第 {attempt + 1} 次尝试未能进入登录页。")
+                        if attempt < max_retries - 1:
+                            self.log("🔄 准备刷新页面重试...")
+                            page.refresh()
+            # ==========================================================
+
+            self.log("🔄 页面安全，开始注入 Cookie...")
             cookies = json.loads(cookie_json)
             page.set.cookies(cookies)
             
@@ -313,7 +338,7 @@ class WeirdhostGHA:
         except: pass
 
     def run(self):
-        self.log("🚀 启动极速自动化流程 (修复性能 Bug 版)...")
+        self.log("🚀 启动极速自动化流程 (完美还原单账号逻辑版)...")
         if not self.accounts:
             self.log("❌ 致命错误: 未检测到任何 WEIRDHOST_COOKIE 配置！")
             return
@@ -378,13 +403,12 @@ class WeirdhostGHA:
                         ss_name = f'status_skip_{srv_id}.png'
                         page.get_screenshot(path='.', name=ss_name)
                         
-                        msg = f"🤖 <b>Weirdhost 续期报告</b>\n✅ {srv_id}: 无需续期\n📅 解析到期日: {expiry_str} (剩余 {days} 天)\n⏭️ 剩余 {days} 天，跳过"
+                        msg = f"🤖 <b>Weirdhost 续期报告</b>\n👤 账号: {acc['index']}\n✅ <code>{srv_id}</code>: 无需续期\n📅 解析到期日: {expiry_str} (剩余 {days} 天)\n⏭️ 剩余 {days} 天，跳过"
                         self.send_tg_notification(msg, ss_name)
                         continue
                     
                     self.log("🔄 续期中...")
                     
-                    # ⚠️ 性能修复 1：加上极其重要的 timeout=1
                     renew_btn = (page.ele('css:button.bkrtgq', timeout=1) or 
                                  page.ele('text:Extend', timeout=1) or 
                                  page.ele('text:연장하기', timeout=1) or 
@@ -415,7 +439,6 @@ class WeirdhostGHA:
                                 self.log("⏳ 正在极速探测过盾后的弹窗...")
                                 next_btn = None
                                 for _ in range(10):
-                                    # ⚠️ 性能修复 2：加上极其重要的 timeout=0.5
                                     next_btn = (page.ele('css:div[class*="Popup__Styled"] button', timeout=0.5) or 
                                                 page.ele('xpath://button[contains(., "Next") or contains(., "NEXT")]', timeout=0.5))
                                     if next_btn: break
@@ -437,7 +460,6 @@ class WeirdhostGHA:
                                     time.sleep(2)
                                     close_btn = None
                                     for _ in range(5):
-                                        # ⚠️ 性能修复 3：加上极其重要的 timeout=0.5
                                         close_btn = (page.ele('css:div[class*="Popup__Styled"] button', timeout=0.5) or 
                                                      page.ele('xpath://button[contains(., "닫기")]', timeout=0.5))
                                         if close_btn: break
@@ -470,12 +492,13 @@ class WeirdhostGHA:
                     new_days, new_date = self.get_remaining_days(page)
                     new_date_str = new_date.strftime('%Y-%m-%d %H:%M:%S') if new_date else '未知时间'
                     
-                    msg = f"🤖 <b>Weirdhost 续期报告</b>\n"
+                    # 按照主人的要求，高度定制排版！
+                    msg = f"🤖 <b>Weirdhost 续期报告</b>\n👤 账号: {acc['index']}\n"
                     if status == "🎉 续期成功" or status == "🎉 续期已提交":
-                        msg += f"✅ {srv_id}: 续期成功\n📅 解析到期日: {new_date_str}"
+                        msg += f"✅ <code>{srv_id}</code>: 续期成功\n📅 解析到期日: {new_date_str}"
                         if new_days is not None: msg += f" (剩余 {new_days} 天)"
                     else:
-                        msg += f"🔄 {srv_id}: {status}\n📅 当前到期日: {new_date_str}"
+                        msg += f"🔄 <code>{srv_id}</code>: {status}\n📅 解析到期日: {new_date_str}"
                         if new_days is not None: msg += f" (剩余 {new_days} 天)"
                     
                     self.send_tg_notification(msg, final_ss)
